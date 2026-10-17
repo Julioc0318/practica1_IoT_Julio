@@ -1,0 +1,22 @@
+# 编译生成的中间文件与最终镜像（这些不需要版本控制，可以通过 make 随时重新生成）
+build/
+Debug/
+Release/
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.d
+*.su
+
+# IDE 与 VSCode 个人本地配置（防止把你电脑的绝对路径传给别人）
+.vscode/launch.json
+.vscode/tasks.json
+.vscode/c_cpp_properties.json
+.clion/
+.idea/
+
+# 系统自动生成的垃圾文件
+.DS_Store
+Thumbs.db
