@@ -1,14 +1,11 @@
 ## 1. 烧录命令
 我是用 VSCode 工程自带的 Makefile 编译，然后用 STM32CubeProgrammer 的命令行工具通过 ST-LINK 烧录的。
----
 ### 1.1. 进入工程目录
 在终端执行：
 cd "/Users/jc/Desktop/Practica1_IoT_Julio"
----
 ### 1.2. 编译工程
 先指定 STM32 ARM GCC 工具链：
 STM_GCC_DIR="/Users/jc/Library/Application Support/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin"
-
 PATH="$STM_GCC_DIR:$PATH" make -C Debug -j4 all
 成功时会看到：
 Finished building target: Practica1_IoT_Julio.elf
@@ -19,14 +16,12 @@ C:\Users\jruimor\...
 我已经改成当前工程可用的相对路径：
 ../STM32F303ZETX_FLASH.ld
 所以以后可以直接执行上面的编译命令。
----
 ### 1.3. 检查板子是否连接
 执行：
 "/Users/jc/Library/Application Support/stm32cube/bundles/programmer/2.23.0/bin/STM32_Programmer_CLI" --list
 当时检测到：
 Board Name  : NUCLEO-F303ZE
 ST-LINK SN  : 066FFF544949878667191126
----
 ### 1.4. 烧录、校验并复位
 执行的完整命令是：
 "/Users/jc/Library/Application Support/stm32cube/bundles/programmer/2.23.0/bin/STM32_Programmer_CLI" \
@@ -40,10 +35,19 @@ ST-LINK SN  : 066FFF544949878667191126
 - -w ...elf：将编译出的程序写入 Flash。
 - -v：烧录后读取并校验。
 - -rst：成功后复位 MCU，让新程序立即运行。
----
 ### 1.5. 烧录结果
 最终出现下面两句就说明烧录成功：
 Download verified successfully
 Software reset is performed
 以后修改代码后，只需要重复“第 2 步编译”和“第 4 步烧录”即可。
----
+## 2. GIT
+### 2.1. 初始化 Git 仓库
+git init
+### 2.2. 将代码和配置文件添加到暂存区（会自动应用 .gitignore 忽略 build 目录）
+git add .
+### 2.3. 提交你的第一次代码版本
+git commit -m "Initial commit: CAN loopback functionality"
+### 2.4. （可选）关联到远端仓库（如 GitHub / Gitee / GitLab）
+git remote add origin <你的远程仓库地址.git>
+git branch -M main
+git push -u origin main
