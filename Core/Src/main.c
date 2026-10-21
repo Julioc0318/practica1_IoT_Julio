@@ -65,9 +65,10 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 // 这里专门写函数声明
 HAL_StatusTypeDef CAN_Configurar_Filtrado(void);
-HAL_StatusTypeDef CAN_TX_Generic(uint32_t stdId, uint8_t *pData, uint8_t len);
 // 当 FIFO0 收到新报文触发中断时的回调函数
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan);
+// 发送远程帧的函数声明
+HAL_StatusTypeDef CAN_TX_Remote(uint32_t stdId, uint8_t len);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -77,7 +78,7 @@ HAL_StatusTypeDef CAN_Configurar_Filtrado(void) {
   CAN_FilterTypeDef sFilterConfig = {0};
 
   sFilterConfig.FilterBank = 0;
-  sFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK; // Mask Mode
+  sFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK; // 使用掩码模式
   sFilterConfig.FilterScale = CAN_FILTERSCALE_32BIT;
   // 在 STM32 32位过滤器寄存器映射中，标准帧 ID（StdId 11位）位于高 16
   // 位寄存器的 [15:5] 位，因此传入 0x123 时必须左移 5 位才能正确填进寄存器。
@@ -97,10 +98,10 @@ HAL_StatusTypeDef CAN_Configurar_Filtrado(void) {
   return HAL_OK;
 }
 
-HAL_StatusTypeDef CAN_TX_Generic(uint32_t stdId, uint8_t *pData, uint8_t len) {
+HAL_StatusTypeDef CAN_TX_Remote(uint32_t stdId, uint8_t len) {
   TxHeader.StdId = stdId;                // 设置标准 ID
   TxHeader.ExtId = 0;                    // 扩展 ID 填 0
-  TxHeader.RTR = CAN_RTR_DATA;           // 数据帧类型
+  TxHeader.RTR = CAN_RTR_REMOTE;         // 远程帧类型
   TxHeader.IDE = CAN_ID_STD;             // 标准帧类型 (11位)
   TxHeader.DLC = len;                    // 数据长度 (0~8)
   TxHeader.TransmitGlobalTime = DISABLE; // 不用时间戳
@@ -115,11 +116,11 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
   if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) {
     msg_count++;
     if (RxHeader.StdId == 0x123) {
-      msg_123_count++;
-      // 中断接收成功：点亮 LD2，并由主循环在 100 ms 后关闭。
-      // 中断处理函数内不能调用 HAL_Delay，否则低优先级 SysTick 无法推进计时。
-      HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
-      ld2_off_tick = HAL_GetTick() + 100U;
+      if (RxHeader.RTR == CAN_RTR_REMOTE) {
+        // 收到远程帧：点亮 LD1，并由主循环在 100 ms 后关闭。
+        HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_SET);
+        ld2_off_tick = HAL_GetTick() + 100U;
+      }
     } else {
       HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_SET);
       ld2_off_tick = HAL_GetTick() + 100U;
@@ -217,11 +218,11 @@ int main(void) {
       uint8_t datos_test[4] = {0x11, 0x22, 0x33, 0x44};
 
       // 连续发送三条
-      CAN_TX_Generic(0x123, datos_test, 4);
+      CAN_TX_Remote(0x123, datos_test, 4);
       HAL_Delay(50);
-      CAN_TX_Generic(0x456, datos_test, 4);
+      CAN_TX_Remote(0x456, datos_test, 4);
       HAL_Delay(50);
-      CAN_TX_Generic(0x789, datos_test, 4);
+      CAN_TX_Remote(0x789, datos_test, 4);
     }
     last_btn = btn;
 
