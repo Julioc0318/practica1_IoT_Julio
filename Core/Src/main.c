@@ -26,12 +26,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#define NODE_ID 0x123
-#define OFFER_MSG_ID 0x0134
 
-#define INICIAL_DELAY_MS 50
-#define MAX_DELAY_MS 3200
-#define OFFER_PERIOD_MS 1000
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -41,7 +36,13 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define NODE_ID 0x123
+#define OFFER_MSG_ID 0x0134
 
+#define INICIAL_DELAY_MS 50
+#define MAX_DELAY_MS 3200
+#define OFFER_PERIOD_MS 1000
+#define LD3_ON_TIME_MS 100U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -58,9 +59,9 @@ CAN_RxHeaderTypeDef RxHeader;                 // 接收帧头结构体
 uint8_t TxData[8];                            // 发送数据缓冲区（最多8字节）
 uint8_t RxData[8];                            // 接收数据缓冲区（最多8字节）
 uint32_t TxMailbox;                           // 发送邮箱变量
-uint16_t current_delay_ms = INICIAL_DELAY_MS; // 当前目标 ID
-static volatile uint32_t last_offer_tick = 0U;
-static volatile uint32_t ld_off_tick = 0U;
+static volatile uint16_t current_delay_ms = INICIAL_DELAY_MS; // 当前延时值（中断中修改）
+static uint32_t last_offer_tick = 0U;
+static volatile uint32_t ld_off_tick = 0U;    // LD3 熄灭时刻，0 表示不需要熄灭
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -68,9 +69,7 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 // 这里专门写函数声明
 HAL_StatusTypeDef CAN_Configurar_Filtrado(void);
-// 当 FIFO0 收到新报文触发中断时的回调函数
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan);
-// 发送数据帧或远程帧的函数声明
+// 发送数据帧的函数声明
 HAL_StatusTypeDef CAN_TX_SendFrame(uint32_t stdId, uint8_t *pData, uint8_t len);
 /* USER CODE END PFP */
 
@@ -89,8 +88,8 @@ HAL_StatusTypeDef CAN_Configurar_Filtrado(void) {
   sFilterConfig.SlaveStartFilterBank = 14;
 
   sFilterConfig.FilterBank = 0;
-  sFilterConfig.FilterIdHigh = (OFFER_MSG_ID << 5);
-  sFilterConfig.FilterMaskIdHigh = (0x7FF << 5);
+  sFilterConfig.FilterIdHigh = (OFFER_MSG_ID << 5);   // 只接收标准 ID 0x134
+  sFilterConfig.FilterMaskIdHigh = (0x7FF << 5);      // 11 位 ID 全部比较
 
   if (HAL_CAN_ConfigFilter(&hcan, &sFilterConfig) != HAL_OK) {
     Error_Handler();
@@ -99,8 +98,8 @@ HAL_StatusTypeDef CAN_Configurar_Filtrado(void) {
   return HAL_OK;
 }
 
-HAL_StatusTypeDef CAN_TX_SendDataFrame(uint32_t stdId, unit_t *pData,
-                                       uint8_t len) {
+HAL_StatusTypeDef CAN_TX_SendFrame(uint32_t stdId, uint8_t *pData,
+                                   uint8_t len) {
   TxHeader.StdId = stdId;
   TxHeader.ExtId = 0;
   TxHeader.RTR = CAN_RTR_DATA;
@@ -111,24 +110,27 @@ HAL_StatusTypeDef CAN_TX_SendDataFrame(uint32_t stdId, unit_t *pData,
   return HAL_CAN_AddTxMessage(&hcan, &TxHeader, pData, &TxMailbox);
 }
 
-// 无需手动挂载或注册到某个地方
+// HAL 库的弱函数，这里重写即可，无需手动注册
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
   // 自动从 FIFO0 提取收到的报文头和数据
   if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) {
-    if (RxHeader.StdId == OFFERED_MSG_ID && RxHeader.RTR == CAN_RTR_REMOTE) {
+    if (RxHeader.StdId == OFFER_MSG_ID && RxHeader.RTR == CAN_RTR_REMOTE) {
       uint8_t resp_data[2];
-      resp_data[0] = (uint_8)(current_delay_ms & 0xFF);
-      resp_data[1] = (uint_8)((current_delay_ms >> 8) & 0xFF);
+      resp_data[0] = (uint8_t)(current_delay_ms & 0xFF);
+      resp_data[1] = (uint8_t)((current_delay_ms >> 8) & 0xFF);
 
-      CAN_TX_SendFrame(OFFER_MSG_ID, resp_data, 2)
+      CAN_TX_SendFrame(OFFER_MSG_ID, resp_data, 2);
 
-          current_delay_ms *= 2;
+      current_delay_ms *= 2;
       if (current_delay_ms > MAX_DELAY_MS) {
         current_delay_ms = INICIAL_DELAY_MS;
       }
 
       HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
-      ld_off_tick = HAL_GetTick() + 100U;
+      ld_off_tick = HAL_GetTick() + LD3_ON_TIME_MS;
+      if (ld_off_tick == 0U) {
+        ld_off_tick = 1U; // 避免与“无需熄灭”的 0 冲突
+      }
     }
   }
 }
@@ -172,10 +174,7 @@ int main(void) {
   MX_CAN_Init();
 
   /* USER CODE BEGIN 2 */
-  // 定义按钮上次状态变量位未按下
-  GPIO_PinState last_btn = GPIO_PIN_RESET;
-
-  CAN_Configurar_Filtrado(0);
+  CAN_Configurar_Filtrado();
 
   // 启用 NVIC 中与 USB 低优先级共享的 CAN RX0 中断通道。
   HAL_NVIC_SetPriority(USB_LP_CAN_RX0_IRQn, 0, 0);
@@ -183,7 +182,6 @@ int main(void) {
 
   // 激活 CAN RX FIFO0 消息挂起中断通知
   // 当 FIFO0 收到新报文时，触发中断，调用 HAL_CAN_RxFifo0MsgPendingCallback()
-  // 回调函数
   if (HAL_CAN_ActivateNotification(&hcan, CAN_IT_RX_FIFO0_MSG_PENDING) !=
       HAL_OK) {
     Error_Handler();
@@ -204,19 +202,23 @@ int main(void) {
     /* USER CODE BEGIN 3 */
     // 这里是业务逻辑
     uint32_t current_tick = HAL_GetTick();
+
+    // 每 OFFER_PERIOD_MS 发送一次 offer 报文
     if (current_tick - last_offer_tick >= OFFER_PERIOD_MS) {
       last_offer_tick = current_tick;
 
       uint8_t offer_data[2];
-      offer_data[0] = (uint_8)((OFFER_MSG_ID >> 8) & 0xFF);
-      offer_data[1] = (uint_8)(OFFER_MSG_ID & 0xFF);
+      offer_data[0] = (uint8_t)((OFFER_MSG_ID >> 8) & 0xFF);
+      offer_data[1] = (uint8_t)(OFFER_MSG_ID & 0xFF);
 
-      CAN_TX_SendDataFrame(NODE_ID, offer_data, 2);
+      CAN_TX_SendFrame(NODE_ID, offer_data, 2);
     }
 
-    if (ld_off_tick != 0U && current_tick - ld_off_tick >= 0) {
-      HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN\RESET);
-      ld3_off_tick = 0U;
+    // 到时间后熄灭 LD3（有符号比较，可正确处理 tick 回绕）
+    uint32_t off_tick = ld_off_tick;
+    if (off_tick != 0U && (int32_t)(current_tick - off_tick) >= 0) {
+      HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
+      ld_off_tick = 0U;
     }
 
     HAL_Delay(10);
