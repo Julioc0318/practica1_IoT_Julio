@@ -53,10 +53,10 @@ CAN_RxHeaderTypeDef RxHeader; // 接收帧头结构体
 uint8_t TxData[8];            // 发送数据缓冲区（最多8字节）
 uint8_t RxData[8];            // 接收数据缓冲区（最多8字节）
 uint32_t TxMailbox;           // 发送邮箱变量
-// 记录收到的总报文数量
 uint32_t msg_count = 0;
-// 记录收到 ID 为 0x123 的报文数量
-uint32_t msg_123_count = 0;
+uint16_t current_target_id = 0; // 当前目标 ID
+uint8_t offer_received = 0;
+static volatile uint32_t ld1_off_tick = 0U;
 static volatile uint32_t ld2_off_tick = 0U;
 /* USER CODE END PV */
 
@@ -64,62 +64,57 @@ static volatile uint32_t ld2_off_tick = 0U;
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 // 这里专门写函数声明
-HAL_StatusTypeDef CAN_Configurar_Filtrado(void);
+HAL_StatusTypeDef CAN_Configurar_Filtrado(uint16_t target_id);
 // 当 FIFO0 收到新报文触发中断时的回调函数
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan);
 // 发送数据帧或远程帧的函数声明
-HAL_StatusTypeDef CAN_TX_SendFrame(uint32_t stdId, uint8_t *pData, uint8_t len,
-                                   uint32_t rtr);
+HAL_StatusTypeDef CAN_TX_SendFrame(uint32_t stdId, uint8_t *pData, uint8_t len);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 // 这里专门写函数体
-HAL_StatusTypeDef CAN_Configurar_Filtrado(void) {
+HAL_StatusTypeDef CAN_Configurar_Filtrado(uint16_t target_id) {
   CAN_FilterTypeDef sFilterConfig = {0};
 
-  sFilterConfig.FilterBank = 0;
-  sFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK; // 使用掩码模式
+  sFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
   sFilterConfig.FilterScale = CAN_FILTERSCALE_32BIT;
-  // 在 STM32 32位过滤器寄存器映射中，标准帧 ID（StdId 11位）位于高 16
-  // 位寄存器的 [15:5] 位，因此传入 0x123 时必须左移 5 位才能正确填进寄存器。
-  sFilterConfig.FilterIdHigh = (0x123 << 5);
   sFilterConfig.FilterIdLow = 0x0000;
-  // 0x7FF = 11位全1，表示匹配标准帧 ID 的 11 位
-  sFilterConfig.FilterMaskIdHigh = (0x7FF << 5);
   sFilterConfig.FilterMaskIdLow = 0x0000;
-
   sFilterConfig.FilterFIFOAssignment = CAN_RX_FIFO0;
   sFilterConfig.FilterActivation = ENABLE;
   sFilterConfig.SlaveStartFilterBank = 14;
 
+  sFilterConfig.FilterBank = 0;
+  sFilterConfig.FilterIdHigh = (0x000 << 5);
+  sFilterConfig.FilterMaskIdHigh = (0x780 << 5);
+
   if (HAL_CAN_ConfigFilter(&hcan, &sFilterConfig) != HAL_OK) {
     Error_Handler();
   }
+
+  if (target_id >= 128) {
+    sFilterConfig.FilterBank = 1;
+    sFilterConfig.FilterIdHigh = (target_id << 5);
+    sFilterConfig.FilterMaskIdHigh = (0x7FF << 5);
+  }
+
+  if (HAL_CAN_ConfigFilter(&hcan, &sFilterConfig) != HAL_OK) {
+    Error_Handler();
+  }
+
   return HAL_OK;
 }
 
-/**
- * @brief 发送 CAN 帧（自动识别数据帧 / 远程帧）
- * @param stdId 标准 ID (11 位)
- * @param pData 数据缓冲区指针（若为远程帧，可传 NULL）
- * @param len   数据长度 (0 ~ 8)
- * @param rtr   帧类型：CAN_RTR_DATA（数据帧）或 CAN_RTR_REMOTE（远程帧）
- * @retval HAL_StatusTypeDef
- */
-HAL_StatusTypeDef CAN_TX_SendFrame(uint32_t stdId, uint8_t *pData, uint8_t len,
-                                   uint32_t rtr) {
+HAL_StatusTypeDef CAN_TX_SendRemoteFrame(uint32_t stdId) {
   TxHeader.StdId = stdId;
   TxHeader.ExtId = 0;
-  TxHeader.RTR = rtr; // 传入 CAN_RTR_DATA 或 CAN_RTR_REMOTE
+  TxHeader.RTR = CAN_RTR_REMOTE;
   TxHeader.IDE = CAN_ID_STD;
-  TxHeader.DLC = len;
+  TxHeader.DLC = 0;
   TxHeader.TransmitGlobalTime = DISABLE;
 
-  // 如果是远程帧，强制将数据指针设为 NULL（防止误传野指针）
-  uint8_t *tx_data_ptr = (rtr == CAN_RTR_REMOTE) ? NULL : pData;
-
-  return HAL_CAN_AddTxMessage(&hcan, &TxHeader, tx_data_ptr, &TxMailbox);
+  return HAL_CAN_AddTxMessage(&hcan, &TxHeader, NULL, &TxMailbox);
 }
 
 // 无需手动挂载或注册到某个地方
@@ -127,22 +122,21 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
   // 自动从 FIFO0 提取收到的报文头和数据
   if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) {
     msg_count++;
-    if (RxHeader.StdId == 0x123) {
-      if (RxHeader.RTR == CAN_RTR_REMOTE) {
-        // 收到远程帧：点亮 LD1，并由主循环在 100 ms 后关闭。
-        HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_SET);
-        ld2_off_tick = HAL_GetTick() + 100U;
-      } else if (RxHeader.RTR == CAN_RTR_DATA) {
-        // 收到数据帧：点亮 LD2，并由主循环在 100 ms 后关闭。
-        HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
-        ld2_off_tick = HAL_GetTick() + 100U;
-      } else {
-        HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
-        ld2_off_tick = HAL_GetTick() + 100U;
+    if (RxHeader.StdId < 128 && RxHeader.RTR == CAN_RTR_DATA &&
+        RxHeader.DLC == 2) {
+      uint16_t new_target_id = (RxData[0] << 8) | RxData[1];
+      HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_SET);
+      ld1_off_tick = HAL_GetTick() + 100U;
+      if (new_target_id >= 128 && new_target_id != current_target_id) {
+        current_target_id = new_target_id;
+        offer_received = 1;
+        CAN_Configurar_Filtrado(current_target_id);
       }
-    } else {
-      HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
-      ld2_off_tick = HAL_GetTick() + 100U;
+    } else if (offer_received && RxHeader.StdId == current_target_id &&
+               RxHeader.RTR == CAN_RTR_DATA && RxHeader.DLC > 2) {
+      uint16_t delay_ms = (uint16_t)((RxData[0] << 8) | RxData[1]);
+      HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
+      ld2_off_tick = HAL_GetTick() + (uint32_t)delay_ms;
     }
   }
 }
@@ -159,9 +153,11 @@ int main(void) {
 
   /* USER CODE END 1 */
 
-  /* MCU Configuration--------------------------------------------------------*/
+  /* MCU
+   * Configuration--------------------------------------------------------*/
 
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick.
+  /* Reset of all peripherals, Initializes the Flash interface and the
+   * Systick.
    */
   HAL_Init();
 
@@ -187,11 +183,7 @@ int main(void) {
   // 定义按钮上次状态变量位未按下
   GPIO_PinState last_btn = GPIO_PIN_RESET;
 
-  CAN_Configurar_Filtrado();
-
-  // [WARNING-01]
-  // 配置期间先屏蔽全局中断，防止 CAN 尚未完全启动时进入中断入口。
-  // __disable_irq();
+  CAN_Configurar_Filtrado(0);
 
   // 启用 NVIC 中与 USB 低优先级共享的 CAN RX0 中断通道。
   HAL_NVIC_SetPriority(USB_LP_CAN_RX0_IRQn, 0, 0);
@@ -210,9 +202,6 @@ int main(void) {
     Error_Handler();
   }
 
-  // [WARNING-02]
-  // 强制清除 PRIMASK，全局开启可屏蔽中断。
-  // __enable_irq();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -222,8 +211,12 @@ int main(void) {
 
     /* USER CODE BEGIN 3 */
     // 这里是业务逻辑
-    if (ld2_off_tick != 0U && (int32_t)(HAL_GetTick() - ld2_off_tick) >= 0) {
+    if (ld1_off_tick != 0U && (int32_t)(HAL_GetTick() - ld1_off_tick) >= 0) {
       HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_RESET);
+      ld1_off_tick = 0U;
+    }
+
+    if (ld2_off_tick != 0U && (int32_t)(HAL_GetTick() - ld2_off_tick) >= 0) {
       HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
       ld2_off_tick = 0U;
     }
@@ -233,15 +226,10 @@ int main(void) {
 
     // 检测到按键按下（上升沿触发）
     if (btn == GPIO_PIN_SET && last_btn == GPIO_PIN_RESET) {
-      // 准备要发送的数据数组
-      uint8_t datos_test[4] = {0x11, 0x22, 0x33, 0x44};
-
-      // 连续发送三条
-      CAN_TX_SendFrame(0x123, NULL, 4, CAN_RTR_REMOTE);
-      HAL_Delay(50);
-      CAN_TX_SendFrame(0x123, datos_test, 4, CAN_RTR_DATA);
-      HAL_Delay(50);
-      CAN_TX_SendFrame(0x789, NULL, 4, CAN_RTR_REMOTE);
+      if (offer_received && current_target_id >= 128) {
+        // 发送远程帧请求数据
+        CAN_TX_SendRemoteFrame(current_target_id);
+      }
     }
     last_btn = btn;
 
@@ -307,7 +295,8 @@ void SystemClock_Config(void) {
  */
 void Error_Handler(void) {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
+  /* User can add his own implementation to report the HAL error return state
+   */
   __disable_irq();
   while (1) {
   }
@@ -324,8 +313,8 @@ void Error_Handler(void) {
 void assert_failed(uint8_t *file, uint32_t line) {
   /* USER CODE BEGIN 6 */
   /* User can add his own implementation to report the file name and line
-     number, ex: printf("Wrong parameters value: file %s on line %d\r\n", file,
-     line) */
+     number, ex: printf("Wrong parameters value: file %s on line %d\r\n",
+     file, line) */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
