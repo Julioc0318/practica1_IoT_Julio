@@ -26,7 +26,12 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#define NODE_ID 0x123
+#define OFFER_MSG_ID 0x0134
 
+#define INICIAL_DELAY_MS 50
+#define MAX_DELAY_MS 3200
+#define OFFER_PERIOD_MS 1000
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,23 +53,21 @@
 
 /* USER CODE BEGIN PV */
 // 这里专门写全局变量
-CAN_TxHeaderTypeDef TxHeader; // 发送帧头结构体
-CAN_RxHeaderTypeDef RxHeader; // 接收帧头结构体
-uint8_t TxData[8];            // 发送数据缓冲区（最多8字节）
-uint8_t RxData[8];            // 接收数据缓冲区（最多8字节）
-uint32_t TxMailbox;           // 发送邮箱变量
-uint32_t msg_count = 0;
-uint16_t current_target_id = 0; // 当前目标 ID
-uint8_t offer_received = 0;
-static volatile uint32_t ld1_off_tick = 0U;
-static volatile uint32_t ld2_off_tick = 0U;
+CAN_TxHeaderTypeDef TxHeader;                 // 发送帧头结构体
+CAN_RxHeaderTypeDef RxHeader;                 // 接收帧头结构体
+uint8_t TxData[8];                            // 发送数据缓冲区（最多8字节）
+uint8_t RxData[8];                            // 接收数据缓冲区（最多8字节）
+uint32_t TxMailbox;                           // 发送邮箱变量
+uint16_t current_delay_ms = INICIAL_DELAY_MS; // 当前目标 ID
+static volatile uint32_t last_offer_tick = 0U;
+static volatile uint32_t ld_off_tick = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 // 这里专门写函数声明
-HAL_StatusTypeDef CAN_Configurar_Filtrado(uint16_t target_id);
+HAL_StatusTypeDef CAN_Configurar_Filtrado(void);
 // 当 FIFO0 收到新报文触发中断时的回调函数
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan);
 // 发送数据帧或远程帧的函数声明
@@ -74,7 +77,7 @@ HAL_StatusTypeDef CAN_TX_SendFrame(uint32_t stdId, uint8_t *pData, uint8_t len);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 // 这里专门写函数体
-HAL_StatusTypeDef CAN_Configurar_Filtrado(uint16_t target_id) {
+HAL_StatusTypeDef CAN_Configurar_Filtrado(void) {
   CAN_FilterTypeDef sFilterConfig = {0};
 
   sFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
@@ -86,18 +89,8 @@ HAL_StatusTypeDef CAN_Configurar_Filtrado(uint16_t target_id) {
   sFilterConfig.SlaveStartFilterBank = 14;
 
   sFilterConfig.FilterBank = 0;
-  sFilterConfig.FilterIdHigh = (0x000 << 5);
-  sFilterConfig.FilterMaskIdHigh = (0x780 << 5);
-
-  if (HAL_CAN_ConfigFilter(&hcan, &sFilterConfig) != HAL_OK) {
-    Error_Handler();
-  }
-
-  if (target_id >= 128) {
-    sFilterConfig.FilterBank = 1;
-    sFilterConfig.FilterIdHigh = (target_id << 5);
-    sFilterConfig.FilterMaskIdHigh = (0x7FF << 5);
-  }
+  sFilterConfig.FilterIdHigh = (OFFER_MSG_ID << 5);
+  sFilterConfig.FilterMaskIdHigh = (0x7FF << 5);
 
   if (HAL_CAN_ConfigFilter(&hcan, &sFilterConfig) != HAL_OK) {
     Error_Handler();
@@ -106,37 +99,36 @@ HAL_StatusTypeDef CAN_Configurar_Filtrado(uint16_t target_id) {
   return HAL_OK;
 }
 
-HAL_StatusTypeDef CAN_TX_SendRemoteFrame(uint32_t stdId) {
+HAL_StatusTypeDef CAN_TX_SendDataFrame(uint32_t stdId, unit_t *pData,
+                                       uint8_t len) {
   TxHeader.StdId = stdId;
   TxHeader.ExtId = 0;
-  TxHeader.RTR = CAN_RTR_REMOTE;
+  TxHeader.RTR = CAN_RTR_DATA;
   TxHeader.IDE = CAN_ID_STD;
-  TxHeader.DLC = 0;
+  TxHeader.DLC = len;
   TxHeader.TransmitGlobalTime = DISABLE;
 
-  return HAL_CAN_AddTxMessage(&hcan, &TxHeader, NULL, &TxMailbox);
+  return HAL_CAN_AddTxMessage(&hcan, &TxHeader, pData, &TxMailbox);
 }
 
 // 无需手动挂载或注册到某个地方
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
   // 自动从 FIFO0 提取收到的报文头和数据
   if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) {
-    msg_count++;
-    if (RxHeader.StdId < 128 && RxHeader.RTR == CAN_RTR_DATA &&
-        RxHeader.DLC == 2) {
-      uint16_t new_target_id = (RxData[0] << 8) | RxData[1];
-      HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_SET);
-      ld1_off_tick = HAL_GetTick() + 100U;
-      if (new_target_id >= 128 && new_target_id != current_target_id) {
-        current_target_id = new_target_id;
-        offer_received = 1;
-        CAN_Configurar_Filtrado(current_target_id);
+    if (RxHeader.StdId == OFFERED_MSG_ID && RxHeader.RTR == CAN_RTR_REMOTE) {
+      uint8_t resp_data[2];
+      resp_data[0] = (uint_8)(current_delay_ms & 0xFF);
+      resp_data[1] = (uint_8)((current_delay_ms >> 8) & 0xFF);
+
+      CAN_TX_SendFrame(OFFER_MSG_ID, resp_data, 2)
+
+          current_delay_ms *= 2;
+      if (current_delay_ms > MAX_DELAY_MS) {
+        current_delay_ms = INICIAL_DELAY_MS;
       }
-    } else if (offer_received && RxHeader.StdId == current_target_id &&
-               RxHeader.RTR == CAN_RTR_DATA && RxHeader.DLC > 2) {
-      uint16_t delay_ms = (uint16_t)((RxData[0] << 8) | RxData[1]);
-      HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
-      ld2_off_tick = HAL_GetTick() + (uint32_t)delay_ms;
+
+      HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
+      ld_off_tick = HAL_GetTick() + 100U;
     }
   }
 }
@@ -211,27 +203,21 @@ int main(void) {
 
     /* USER CODE BEGIN 3 */
     // 这里是业务逻辑
-    if (ld1_off_tick != 0U && (int32_t)(HAL_GetTick() - ld1_off_tick) >= 0) {
-      HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_RESET);
-      ld1_off_tick = 0U;
+    uint32_t current_tick = HAL_GetTick();
+    if (current_tick - last_offer_tick >= OFFER_PERIOD_MS) {
+      last_offer_tick = current_tick;
+
+      uint8_t offer_data[2];
+      offer_data[0] = (uint_8)((OFFER_MSG_ID >> 8) & 0xFF);
+      offer_data[1] = (uint_8)(OFFER_MSG_ID & 0xFF);
+
+      CAN_TX_SendDataFrame(NODE_ID, offer_data, 2);
     }
 
-    if (ld2_off_tick != 0U && (int32_t)(HAL_GetTick() - ld2_off_tick) >= 0) {
-      HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
-      ld2_off_tick = 0U;
+    if (ld_off_tick != 0U && current_tick - ld_off_tick >= 0) {
+      HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN\RESET);
+      ld3_off_tick = 0U;
     }
-
-    // 读取蓝色按键状态
-    GPIO_PinState btn = HAL_GPIO_ReadPin(USER_Btn_GPIO_Port, USER_Btn_Pin);
-
-    // 检测到按键按下（上升沿触发）
-    if (btn == GPIO_PIN_SET && last_btn == GPIO_PIN_RESET) {
-      if (offer_received && current_target_id >= 128) {
-        // 发送远程帧请求数据
-        CAN_TX_SendRemoteFrame(current_target_id);
-      }
-    }
-    last_btn = btn;
 
     HAL_Delay(10);
   }
